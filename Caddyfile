@@ -1,0 +1,24 @@
+# Native Windows Caddy — place at C:\Caddy\Caddyfile
+#
+# Terminates TLS for the customer's intranet hostname and reverse-proxies to the
+# Synapse container running in WSL2 (reachable on the Windows loopback via WSL2
+# localhost forwarding).
+#
+# TLS = Caddy internal CA (self-signed). The root CA must be trusted on the
+# server AND on every client machine, because the Jackdesk browser talks to
+# Synapse's Client-Server API directly — an untrusted cert breaks Team Chat.
+# See README "Trust the Caddy root CA".
+
+{
+	# Pin all Caddy state (incl. the internal root CA) under C:\Caddy\data so the
+	# root cert has a stable, findable path even when Caddy runs as a service.
+	storage file_system {
+		root C:\Caddy\data
+	}
+}
+
+# Change this hostname per customer (chat.muthuandco.in, ...).
+chat.jackdesk.in {
+	tls internal
+	reverse_proxy 127.0.0.1:8008
+}
