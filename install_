@@ -1,234 +1,33 @@
-@echo off
-setlocal EnableExtensions DisableDelayedExpansion
-title Jackdesk Matrix Synapse - Windows Deployer
+services:
 
-REM ============================================================================
-REM  Jackdesk Matrix Synapse + PostgreSQL - Windows native deployer
-REM ----------------------------------------------------------------------------
-REM  Installs Synapse into a venv, wires it to native PostgreSQL, writes a clean
-REM  homeserver.yaml, and registers Synapse as an auto-start Windows service
-REM  (via NSSM) that depends on the PostgreSQL service.
-REM
-REM  Idempotent: safe to re-run. It will not regenerate the signing key or DB
-REM  password once they exist.
-REM
-REM  The AS registration file (jackdesk-registration.yaml) is NOT generated here.
-REM  Download it from the Jackdesk setup wizard ( /matrix/setup/registration.yaml )
-REM  and place it next to this config BEFORE the service is started.
-REM ============================================================================
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: synapse
+      POSTGRES_PASSWORD: synapsepass
+      POSTGRES_DB: synapse
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synapse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
-REM ----------------------------- CONFIG (edit me) -----------------------------
-set "SERVER_NAME=chat.muthuandco.in"
-set "INSTALL_DIR=C:\Synapse"
-set "LISTEN_BIND=127.0.0.1"
-set "LISTEN_PORT=8008"
-set "PGBIN=C:\Program Files\PostgreSQL\15\bin"
-set "PG_SERVICE=postgresql-x64-18"
-set "PG_HOST=127.0.0.1"
-set "PG_PORT=5432"
-set "SVC_NAME=Synapse"
-set "NSSM=%INSTALL_DIR%\nssm.exe"
-REM  On-prem name resolution: map SERVER_NAME in the local hosts file.
-REM  Set ADD_HOSTS_ENTRY=1 to add it; HOSTS_TARGET is what SERVER_NAME resolves
-REM  to on THIS box (127.0.0.1 is correct for the server itself).
-set "ADD_HOSTS_ENTRY=1"
-set "HOSTS_TARGET=127.0.0.1"
-REM ----------------------------------------------------------------------------
+  synapse:
+    image: matrixdotorg/synapse:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./data:/data
+    ports:
+      - "8008:8008"
+    environment:
+      SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
 
-set "PYEXE=%INSTALL_DIR%\env\Scripts\python.exe"
-set "CFG=%INSTALL_DIR%\homeserver.yaml"
-set "REGFILE=%INSTALL_DIR%\jackdesk-registration.yaml"
-set "SIGNKEY=%INSTALL_DIR%\%SERVER_NAME%.signing.key"
-set "DBPASS_FILE=%INSTALL_DIR%\.db_password"
-
-echo.
-echo === Jackdesk Synapse deployer ===
-echo   server_name : %SERVER_NAME%
-echo   install dir : %INSTALL_DIR%
-echo   listener    : %LISTEN_BIND%:%LISTEN_PORT%
-echo.
-
-REM ---- 0. must run elevated (NSSM + service control need admin) ----
-net session >nul 2>&1
-if errorlevel 1 (
-  echo [ERROR] Please run this script as Administrator.
-  goto :fail
-)
-
-REM ---- 1. prerequisites ----
-where python >nul 2>&1
-if errorlevel 1 (
-  echo [ERROR] Python is not on PATH. Install Python 3.11 x64 first.
-  goto :fail
-)
-if not exist "%PGBIN%\psql.exe" (
-  echo [ERROR] psql.exe not found at "%PGBIN%". Install PostgreSQL 15 or fix PGBIN.
-  goto :fail
-)
-if not exist "%NSSM%" (
-  echo [ERROR] nssm.exe not found at "%NSSM%". Download NSSM and place it there.
-  goto :fail
-)
-
-if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
-if not exist "%INSTALL_DIR%\logs" mkdir "%INSTALL_DIR%\logs"
-
-REM ---- 1b. on-prem hosts entry (so SERVER_NAME resolves locally) ----
-if "%ADD_HOSTS_ENTRY%"=="1" (
-  findstr /i /c:"%SERVER_NAME%" "%SystemRoot%\System32\drivers\etc\hosts" >nul 2>&1
-  if errorlevel 1 (
-    echo [*] Adding hosts entry: %HOSTS_TARGET%  %SERVER_NAME%
-    >>"%SystemRoot%\System32\drivers\etc\hosts" echo %HOSTS_TARGET%    %SERVER_NAME%
-    if errorlevel 1 echo [WARN] Could not edit hosts file ^(Defender tamper protection?^) - add it manually.
-  ) else (
-    echo [*] hosts entry for %SERVER_NAME% already present.
-  )
-)
-
-REM ---- 2. python venv + synapse ----
-if not exist "%PYEXE%" (
-  echo [*] Creating virtualenv...
-  python -m venv "%INSTALL_DIR%\env"
-  if errorlevel 1 goto :fail
-)
-echo [*] Installing/upgrading matrix-synapse[postgres] ...
-"%PYEXE%" -m pip install --upgrade pip >nul
-"%PYEXE%" -m pip install --upgrade "matrix-synapse[postgres]"
-if errorlevel 1 goto :fail
-
-REM ---- 3. signing key + log config (generate once, keep only the keys) ----
-if not exist "%SIGNKEY%" (
-  echo [*] Generating signing key + log config...
-  "%PYEXE%" -m synapse.app.homeserver --server-name %SERVER_NAME% --config-path "%INSTALL_DIR%\_gen.yaml" --generate-config --report-stats=no --data-directory "%INSTALL_DIR%" >nul
-  if errorlevel 1 goto :fail
-  if exist "%INSTALL_DIR%\_gen.yaml" del /q "%INSTALL_DIR%\_gen.yaml"
-)
-
-REM ---- 4. database password (generate once to a file, then read back) ----
-REM  Generate straight to the file with PowerShell, then load with set /p OUTSIDE
-REM  any ( ) block - this avoids parse-time %VAR% expansion pitfalls.
-if not exist "%DBPASS_FILE%" (
-  echo [*] Generating database password...
-  powershell -NoProfile -Command "Set-Content -LiteralPath '%DBPASS_FILE%' -NoNewline -Encoding ascii -Value (-join((48..57+65..90+97..122)|Get-Random -Count 30|ForEach-Object{[char]$_}))"
-)
-set /p "DB_PW=" <"%DBPASS_FILE%"
-
-REM ---- 5. shared secrets for homeserver.yaml (generate once, reuse) ----
-if not exist "%INSTALL_DIR%\.reg_secret"  powershell -NoProfile -Command "Set-Content -LiteralPath '%INSTALL_DIR%\.reg_secret' -NoNewline -Encoding ascii -Value (-join((48..57+65..90+97..122)|Get-Random -Count 44|ForEach-Object{[char]$_}))"
-if not exist "%INSTALL_DIR%\.macaroon"    powershell -NoProfile -Command "Set-Content -LiteralPath '%INSTALL_DIR%\.macaroon' -NoNewline -Encoding ascii -Value (-join((48..57+65..90+97..122)|Get-Random -Count 44|ForEach-Object{[char]$_}))"
-if not exist "%INSTALL_DIR%\.form_secret" powershell -NoProfile -Command "Set-Content -LiteralPath '%INSTALL_DIR%\.form_secret' -NoNewline -Encoding ascii -Value (-join((48..57+65..90+97..122)|Get-Random -Count 44|ForEach-Object{[char]$_}))"
-set /p "REG_SECRET=" <"%INSTALL_DIR%\.reg_secret"
-set /p "MACAROON="   <"%INSTALL_DIR%\.macaroon"
-set /p "FORM="       <"%INSTALL_DIR%\.form_secret"
-
-REM ---- 6. PostgreSQL role + database ----
-echo.
-set /p "PGPASSWORD=Enter PostgreSQL superuser (postgres) password: "
-
-echo [*] Ensuring role 'synapse' ...
-"%PGBIN%\psql.exe" -U postgres -h %PG_HOST% -p %PG_PORT% -tAc "SELECT 1 FROM pg_roles WHERE rolname='synapse'" | findstr "1" >nul
-if errorlevel 1 (
-  "%PGBIN%\psql.exe" -U postgres -h %PG_HOST% -p %PG_PORT% -c "CREATE ROLE synapse LOGIN PASSWORD '%DB_PW%'"
-  if errorlevel 1 goto :pgfail
-) else (
-  "%PGBIN%\psql.exe" -U postgres -h %PG_HOST% -p %PG_PORT% -c "ALTER ROLE synapse LOGIN PASSWORD '%DB_PW%'"
-)
-
-echo [*] Ensuring database 'synapse' (UTF8 / C collation) ...
-"%PGBIN%\psql.exe" -U postgres -h %PG_HOST% -p %PG_PORT% -tAc "SELECT 1 FROM pg_database WHERE datname='synapse'" | findstr "1" >nul
-if errorlevel 1 (
-  "%PGBIN%\psql.exe" -U postgres -h %PG_HOST% -p %PG_PORT% -c "CREATE DATABASE synapse ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0 OWNER synapse"
-  if errorlevel 1 goto :pgfail
-) else (
-  echo     database already exists - leaving as is.
-)
-set "PGPASSWORD="
-
-REM ---- 7. write homeserver.yaml (PowerShell preserves YAML indentation) ----
-if not exist "%CFG%" (
-  echo [*] Writing homeserver.yaml ...
-  set "SN=%SERVER_NAME%"
-  set "DIR=%INSTALL_DIR%"
-  set "BND=%LISTEN_BIND%"
-  set "PRT=%LISTEN_PORT%"
-  set "PH=%PG_HOST%"
-  set "PP=%PG_PORT%"
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "$l=@('server_name: '+$env:SN, 'pid_file: '+$env:DIR+'\homeserver.pid', 'log_config: '+$env:DIR+'\'+$env:SN+'.log.config', 'listeners:', '  - port: '+$env:PRT, '    tls: false', '    type: http', '    x_forwarded: true', '    bind_addresses: ['+$env:BND+']', '    resources:', '      - names: [client, federation]', '        compress: false', 'database:', '  name: psycopg2', '  args:', '    user: synapse', '    password: '+$env:DB_PW, '    database: synapse', '    host: '+$env:PH, '    port: '+$env:PP, '    cp_min: 5', '    cp_max: 10', 'media_store_path: '+$env:DIR+'\media_store', 'max_upload_size: 50M', 'signing_key_path: '+$env:DIR+'\'+$env:SN+'.signing.key', 'trusted_key_servers:', '  - server_name: matrix.org', 'suppress_key_server_warning: true', 'report_stats: false', 'enable_registration: false', 'registration_shared_secret: '+$env:REG_SECRET, 'macaroon_secret_key: '+$env:MACAROON, 'form_secret: '+$env:FORM); Set-Content -LiteralPath ($env:DIR+'\homeserver.yaml') -Value $l -Encoding ascii"
-  if errorlevel 1 goto :fail
-) else (
-  echo [*] homeserver.yaml already present - leaving as is.
-)
-
-REM ---- 7b. attach the AS registration once it has been downloaded ----
-REM  Phase 1 (no reg file yet): Synapse boots WITHOUT app_service_config_files so
-REM  it is reachable for the Jackdesk wizard's version probe.
-REM  Phase 2 (reg file present): append the app_service line, then restart.
-set "NEED_RESTART=0"
-if exist "%REGFILE%" (
-  findstr /i /c:"app_service_config_files" "%CFG%" >nul 2>&1
-  if errorlevel 1 (
-    echo [*] Attaching AS registration to homeserver.yaml ...
-    powershell -NoProfile -Command "Add-Content -LiteralPath '%CFG%' -Encoding ascii -Value @('app_service_config_files:', '  - %INSTALL_DIR%\jackdesk-registration.yaml')"
-    set "NEED_RESTART=1"
-  )
-)
-
-REM ---- 8. install / update the Windows service via NSSM ----
-sc query "%SVC_NAME%" >nul 2>&1
-if errorlevel 1 (
-  echo [*] Installing service '%SVC_NAME%' ...
-  "%NSSM%" install "%SVC_NAME%" "%PYEXE%" "-m synapse.app.homeserver -c %CFG%"
-) else (
-  echo [*] Service '%SVC_NAME%' exists - updating ...
-)
-"%NSSM%" set "%SVC_NAME%" AppDirectory "%INSTALL_DIR%"
-"%NSSM%" set "%SVC_NAME%" DisplayName "Jackdesk Matrix Synapse"
-"%NSSM%" set "%SVC_NAME%" Description "Matrix Synapse homeserver for Jackdesk Team Chat"
-"%NSSM%" set "%SVC_NAME%" Start SERVICE_AUTO_START
-"%NSSM%" set "%SVC_NAME%" DependOnService "%PG_SERVICE%"
-"%NSSM%" set "%SVC_NAME%" AppStdout "%INSTALL_DIR%\logs\synapse.out.log"
-"%NSSM%" set "%SVC_NAME%" AppStderr "%INSTALL_DIR%\logs\synapse.err.log"
-"%NSSM%" set "%SVC_NAME%" AppRotateFiles 1
-"%NSSM%" set "%SVC_NAME%" AppRotateBytes 10485760
-"%NSSM%" set "%SVC_NAME%" AppExit Default Restart
-"%NSSM%" set "%SVC_NAME%" AppRestartDelay 5000
-
-REM ---- 9. start / restart the service ----
-REM  Synapse boots fine with or without the AS line, so we always bring it up.
-REM  'nssm restart' starts a stopped service and restarts a running one, so it is
-REM  safe both on first install and after the AS line was just attached.
-echo.
-echo [*] Starting/restarting service ...
-"%NSSM%" restart "%SVC_NAME%"
-
-if exist "%REGFILE%" goto :done
-echo.
-echo [NEXT] Synapse is starting WITHOUT the app-service yet (phase 1).
-echo        1) Point Caddy/TLS at it so https://%SERVER_NAME% is reachable.
-echo        2) Run the Jackdesk Matrix wizard (Connect) - it probes Synapse.
-echo        3) Download registration.yaml to:
-echo             %REGFILE%
-echo        4) Re-run this script - it will attach the AS line and restart.
-goto :done
-
-:pgfail
-set "PGPASSWORD="
-echo [ERROR] PostgreSQL step failed - check the superuser password / service.
-goto :fail
-
-:fail
-echo.
-echo *** Deployment FAILED. See messages above. ***
-endlocal
-exit /b 1
-
-:done
-echo.
-echo === Done ===
-echo   Config        : %CFG%
-echo   AS reg file   : %REGFILE%
-echo   Service       : %SVC_NAME% (auto-start, depends on %PG_SERVICE%)
-echo   Health check  : curl http://%LISTEN_BIND%:%LISTEN_PORT%/health
-echo.
-endlocal
-exit /b 0
+volumes:
+  pgdata:
