@@ -33,7 +33,7 @@ load_env(){
   set -a; . ./.env; set +a
   : "${SERVER_NAME:?set SERVER_NAME in .env}"
   : "${SYNAPSE_DB_PASSWORD:?set SYNAPSE_DB_PASSWORD in .env}"
-  [ "$SYNAPSE_DB_PASSWORD" = "CHANGE_ME" ] && die "Set a real SYNAPSE_DB_PASSWORD in .env."
+  if [ "$SYNAPSE_DB_PASSWORD" = "CHANGE_ME" ]; then die "Set a real SYNAPSE_DB_PASSWORD in .env."; fi
 }
 
 # ── PHASE 9-10: attach AS + restart, then provision/verify ────────────────────
