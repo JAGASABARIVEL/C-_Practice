@@ -1,0 +1,8 @@
+# Copy to .env and fill in. Used by docker-compose.yml.
+#
+# The DB password here MUST match the database.args.password in data/homeserver.yaml.
+# Generate one:  openssl rand -base64 30 | tr -d '/+=' | cut -c1-30
+SYNAPSE_DB_PASSWORD=CHANGE_ME
+
+# The customer's intranet hostname. Per customer this changes (chat.muthuandco.in, ...).
+SERVER_NAME=chat.jackdesk.in
