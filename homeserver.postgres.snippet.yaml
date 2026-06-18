@@ -1,0 +1,47 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# These are the EDITS to apply to the generated data/homeserver.yaml after you
+# run the one-off `generate` step (see README, step 4). Do not paste this file
+# wholesale — the `generate` step already produced valid signing key + secrets;
+# you only swap the database block and harden a few keys.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 1) REPLACE the default sqlite `database:` block with this Postgres block.
+#    `host: postgres` is the compose service name. Password must equal
+#    SYNAPSE_DB_PASSWORD from .env.
+database:
+  name: psycopg2
+  args:
+    user: synapse
+    password: CHANGE_ME            # == SYNAPSE_DB_PASSWORD in .env
+    database: synapse
+    host: postgres
+    port: 5432
+    cp_min: 5
+    cp_max: 10
+
+# 2) Ensure the http listener trusts the Caddy reverse proxy. The generated
+#    listener already binds 0.0.0.0:8008 inside the container — just add
+#    x_forwarded so client IPs/proto come from Caddy's X-Forwarded-* headers:
+#
+#    listeners:
+#      - port: 8008
+#        tls: false
+#        type: http
+#        x_forwarded: true          # <- add this
+#        bind_addresses: ['0.0.0.0']
+#        resources:
+#          - names: [client, federation]
+#            compress: false
+
+# 3) Harden / quiet down for an intranet-only single homeserver:
+enable_registration: false          # users are minted via the AS, not self-signup
+report_stats: false
+trusted_key_servers: []             # no federation to matrix.org
+suppress_key_server_warning: true
+max_upload_size: 50M
+
+# 4) PHASE 2 ONLY — after you download jackdesk-registration.yaml into ./data,
+#    append this so Synapse loads the Application Service, then restart synapse:
+#
+# app_service_config_files:
+#   - /data/jackdesk-registration.yaml
