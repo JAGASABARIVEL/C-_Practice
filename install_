@@ -1,12 +1,21 @@
+# Jackdesk Matrix Synapse + PostgreSQL 18 — WSL2/Docker stack (Windows staging)
+#
+# Runs INSIDE a WSL2 distro (Ubuntu) with Docker. Synapse is published only on
+# the WSL2 loopback (127.0.0.1:8008); native Caddy on Windows reaches it through
+# WSL2's localhost forwarding and terminates TLS for https://chat.jackdesk.in.
+#
+# IMPORTANT: keep this project on the WSL2 Linux filesystem (e.g. ~/jackdesk-synapse),
+# NOT under /mnt/c/... — the ./data bind mount needs Linux ownership/permissions.
 services:
 
   postgres:
-    image: postgres:15-alpine
+    image: postgres:18-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: synapse
-      POSTGRES_PASSWORD: synapsepass
+      POSTGRES_PASSWORD: ${SYNAPSE_DB_PASSWORD:?set SYNAPSE_DB_PASSWORD in .env}
       POSTGRES_DB: synapse
+      # Synapse REQUIRES UTF8 + C collation/ctype. Applied only at first init.
       POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -25,7 +34,9 @@ services:
     volumes:
       - ./data:/data
     ports:
-      - "8008:8008"
+      # Bind to WSL2 loopback only. Windows Caddy reaches this via localhost
+      # forwarding. Do NOT expose 0.0.0.0 — Caddy is the only public entry point.
+      - "127.0.0.1:8008:8008"
     environment:
       SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
 
